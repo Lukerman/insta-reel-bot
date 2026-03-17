@@ -73,7 +73,7 @@ MAX_REELS_PER_CYCLE=6
 BATCH_SIZE=3
 
 # Caption for reposted reels
-CAPTION_TEMPLATE=link in bio 🔗
+CAPTION_TEMPLATE=🎬 Reposted | Credit: @{source}
 ```
 
 ### 4. Run the bot

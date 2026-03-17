@@ -1,0 +1,19 @@
+# Credentials & secrets
+.env
+ig_session.json
+
+# Downloads & database
+downloads/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+logs/
+
+# IDE
+.vscode/
+.idea/

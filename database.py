@@ -82,7 +82,7 @@ class Database:
     def get_pending_downloads(self, limit: int = 10) -> list:
         """Get reels that are discovered but not yet downloaded."""
         rows = self.conn.execute(
-            "SELECT * FROM reels WHERE status = 'discovered' ORDER BY discovered_at ASC LIMIT ?",
+            "SELECT * FROM reels WHERE status = 'discovered' ORDER BY RANDOM() LIMIT ?",
             (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
@@ -90,7 +90,7 @@ class Database:
     def get_pending_uploads(self, limit: int = 10) -> list:
         """Get reels that are downloaded but not yet uploaded."""
         rows = self.conn.execute(
-            "SELECT * FROM reels WHERE status = 'downloaded' ORDER BY downloaded_at ASC LIMIT ?",
+            "SELECT * FROM reels WHERE status = 'downloaded' ORDER BY RANDOM() LIMIT ?",
             (limit,)
         ).fetchall()
         return [dict(r) for r in rows]

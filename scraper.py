@@ -79,13 +79,17 @@ class ReelScraper:
 
             except UserNotFound:
                 logger.error(f"  ❌ Profile @{username} not found, skipping.")
+                continue
             except PleaseWaitFewMinutes:
-                logger.warning(f"  ⏳ Rate limited while scanning @{username}. Will retry next cycle.")
-                break
+                logger.warning(f"  ⏳ Rate limited while scanning @{username}. Skipping to next account.")
+                time.sleep(10)  # Brief cooldown before trying next account
+                continue
             except ClientError as e:
                 logger.error(f"  ❌ API error for @{username}: {e}")
+                continue
             except Exception as e:
                 logger.error(f"  ❌ Error scanning @{username}: {e}")
+                continue
 
         logger.info(f"📊 Scan complete. {len(new_reels)} new reel(s) discovered.")
         return new_reels

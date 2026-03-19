@@ -14,6 +14,7 @@ import asyncio
 import logging
 import signal
 from datetime import datetime
+from pathlib import Path
 
 # Add project dir to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -22,7 +23,7 @@ from config import Config
 from database import Database
 from scraper import ReelScraper
 from downloader import ReelDownloader
-from uploader import ReelUploader
+from uploader import UploaderManager
 from telegram_bot import TelegramNotifier
 
 # ─── Logging Setup ───────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ async def run_cycle(
     db: Database,
     scraper: ReelScraper,
     downloader: ReelDownloader,
-    uploader: ReelUploader,
+    uploader_mgr: UploaderManager,
     telegram: TelegramNotifier,
 ):
     """Run one full scrape → download → upload cycle."""
@@ -104,16 +105,19 @@ async def run_cycle(
         logger.error(f"❌ Downloader error: {e}")
         await telegram.notify_error(f"Downloader failed: {e}")
 
-    # ── Step 3: Upload pending reels (in batches) ──
+    # ── Step 3: Upload pending reels (distributed across target accounts) ──
     try:
-        uploaded = uploader.upload_pending(
+        uploaded = uploader_mgr.upload_pending(
             limit=config.max_reels_per_cycle,
             delay_minutes=config.upload_delay_minutes,
             batch_size=config.batch_size,
         )
         uploaded_count = len(uploaded)
         for reel in uploaded:
-            await telegram.notify_upload(reel["shortcode"], reel["source_account"], True)
+            target = reel.get("target_account", "unknown")
+            await telegram.notify_upload(
+                reel["shortcode"], reel["source_account"], True, target_account=target
+            )
     except Exception as e:
         logger.error(f"❌ Uploader error: {e}")
         await telegram.notify_error(f"Uploader failed: {e}")
@@ -124,7 +128,7 @@ async def run_cycle(
                 f"{downloaded_count} downloaded, {uploaded_count} uploaded.")
 
     # ── Step 4: Cleanup worker ──
-    await cleanup_worker(config, db, uploader, telegram)
+    await cleanup_worker(config, db, uploader_mgr, telegram)
 
 
 # ─── Cleanup Worker ──────────────────────────────────────────────────────────
@@ -132,13 +136,13 @@ async def run_cycle(
 async def cleanup_worker(
     config: Config,
     db: Database,
-    uploader: ReelUploader,
+    uploader_mgr: UploaderManager,
     telegram: TelegramNotifier,
 ):
     """
     Safety-net worker: scans the downloads folder and cleans up leftover files.
     - If a file's reel is already uploaded in DB → delete the file
-    - If a file's reel is still 'downloaded' in DB → upload it, then delete
+    - If a file's reel is still 'downloaded' in DB → upload it via the first available uploader, then delete
     - If a file has no DB entry → delete it (orphan)
     """
     download_dir = config.download_dir
@@ -156,6 +160,9 @@ async def cleanup_worker(
     logger.info(f"🧹 Cleanup worker: found {len(all_files)} file(s) in downloads/")
     cleaned = 0
 
+    # Use first available uploader for cleanup uploads
+    cleanup_uploader = uploader_mgr.uploaders[0] if uploader_mgr.uploaders else None
+
     for filepath in all_files:
         filename = os.path.basename(filepath)
 
@@ -171,7 +178,7 @@ async def cleanup_worker(
         try:
             # Look up this reel in the database
             row = db.conn.execute(
-                "SELECT status FROM reels WHERE shortcode = ?", (shortcode,)
+                "SELECT status, source_account FROM reels WHERE shortcode = ?", (shortcode,)
             ).fetchone()
 
             if row is None:
@@ -186,27 +193,25 @@ async def cleanup_worker(
                 _force_delete(filepath)
                 cleaned += 1
 
-            elif row["status"] == "downloaded":
+            elif row["status"] == "downloaded" and cleanup_uploader:
                 # Not yet uploaded — upload it now, then delete
                 logger.info(f"  📤 Missed upload, uploading now: {filename}")
                 try:
-                    from pathlib import Path
-                    caption = config.caption_template.replace(
-                        "{source}",
-                        row["source_account"] if "source_account" in row.keys() else "unknown"
-                    )
-
-                    # Re-query to get source_account
-                    full_row = db.conn.execute(
-                        "SELECT source_account FROM reels WHERE shortcode = ?", (shortcode,)
-                    ).fetchone()
-                    source = full_row["source_account"] if full_row else "unknown"
+                    source = row["source_account"] if row["source_account"] else "unknown"
                     caption = config.caption_template.replace("{source}", source)
 
-                    media = uploader.client.clip_upload(Path(filepath), caption=caption)
-                    db.update_status(shortcode, "uploaded")
+                    media = cleanup_uploader.client.clip_upload(
+                        Path(filepath), caption=caption
+                    )
+                    db.update_status(
+                        shortcode, "uploaded",
+                        target_account=cleanup_uploader.username
+                    )
                     logger.info(f"  ✅ Uploaded {shortcode} (media ID: {media.pk})")
-                    await telegram.notify_upload(shortcode, source, True)
+                    await telegram.notify_upload(
+                        shortcode, source, True,
+                        target_account=cleanup_uploader.username
+                    )
 
                     # Now delete
                     _force_delete(filepath)
@@ -258,9 +263,20 @@ async def main():
 
     db = Database(config.db_path)
     downloader = ReelDownloader(db, config.download_dir)
-    uploader = ReelUploader(db, config.ig_username, config.ig_password, config.caption_template)
-    scraper = ReelScraper(db, uploader.client)  # Share authenticated client
-    telegram = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id, db)
+
+    # Initialize multi-account uploader
+    uploader_mgr = UploaderManager(
+        db=db,
+        target_accounts=config.target_accounts,
+        caption_template=config.caption_template,
+    )
+
+    # Share authenticated client from first uploader with scraper
+    scraper = ReelScraper(db, uploader_mgr.get_first_client())
+    telegram = TelegramNotifier(
+        config.telegram_bot_token, config.telegram_chat_id, db,
+        target_accounts=uploader_mgr.get_account_names(),
+    )
 
     # Start Telegram bot (polling in background)
     app = telegram.build_app()
@@ -273,7 +289,7 @@ async def main():
 
     try:
         while not shutdown_flag:
-            await run_cycle(config, db, scraper, downloader, uploader, telegram)
+            await run_cycle(config, db, scraper, downloader, uploader_mgr, telegram)
 
             if shutdown_flag:
                 break

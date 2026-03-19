@@ -1,6 +1,7 @@
 """
 Telegram bot — sends status updates and handles user commands.
 Commands: /status, /recent, /pause, /resume, /help
+Supports multi-account target display.
 """
 
 import logging
@@ -20,11 +21,12 @@ logger = logging.getLogger(__name__)
 class TelegramNotifier:
     """Telegram bot for status notifications and control commands."""
 
-    def __init__(self, bot_token: str, chat_id: str, db: Database):
+    def __init__(self, bot_token: str, chat_id: str, db: Database, target_accounts: list[str] = None):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.db = db
         self.paused = False
+        self.target_accounts = target_accounts or []
         self._app = None
         self._bot = Bot(token=bot_token)
 
@@ -40,8 +42,11 @@ class TelegramNotifier:
             logger.error(f"❌ Failed to send Telegram message: {e}")
 
     async def notify_startup(self):
+        accounts_str = ", ".join(f"@{a}" for a in self.target_accounts) if self.target_accounts else "N/A"
         await self.send_message(
             "🤖 <b>Instagram Reel Bot Started</b>\n\n"
+            f"Target accounts: {accounts_str}\n"
+            f"Total targets: <b>{len(self.target_accounts)}</b>\n\n"
             "Bot is now monitoring source accounts.\n"
             "Use /help to see available commands."
         )
@@ -66,20 +71,30 @@ class TelegramNotifier:
                 f"Reel <code>{shortcode}</code> from @{source}"
             )
 
-    async def notify_upload(self, shortcode: str, source: str, success: bool):
+    async def notify_upload(self, shortcode: str, source: str, success: bool, target_account: str = None):
+        target_str = f" → @{target_account}" if target_account else ""
         if success:
             await self.send_message(
                 f"📤 <b>Uploaded!</b>\n"
-                f"Reel <code>{shortcode}</code> from @{source} ✅"
+                f"Reel <code>{shortcode}</code> from @{source}{target_str} ✅"
             )
         else:
             await self.send_message(
                 f"❌ <b>Upload Failed</b>\n"
-                f"Reel <code>{shortcode}</code> from @{source}"
+                f"Reel <code>{shortcode}</code> from @{source}{target_str}"
             )
 
     async def notify_cycle_summary(self, discovered: int, downloaded: int, uploaded: int):
         stats = self.db.get_stats()
+        target_stats = self.db.get_stats_by_target()
+
+        # Build per-account breakdown
+        target_lines = ""
+        if target_stats:
+            target_lines = "\n<b>Uploads by Account:</b>\n"
+            for account, count in target_stats.items():
+                target_lines += f"  📱 @{account}: {count}\n"
+
         await self.send_message(
             f"📊 <b>Cycle Summary</b>\n\n"
             f"New reels discovered: {discovered}\n"
@@ -91,6 +106,7 @@ class TelegramNotifier:
             f"  ✅ Uploaded: {stats.get('uploaded', 0)}\n"
             f"  ❌ Failed: {stats.get('failed', 0)}\n"
             f"  📁 Total: {stats.get('total', 0)}"
+            f"{target_lines}"
         )
 
     async def notify_error(self, error_msg: str):
@@ -100,14 +116,27 @@ class TelegramNotifier:
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = self.db.get_stats()
+        target_stats = self.db.get_stats_by_target()
         paused_text = "⏸️ PAUSED" if self.paused else "▶️ RUNNING"
+
+        # Per-account breakdown
+        target_lines = ""
+        if target_stats:
+            target_lines = "\n<b>Uploads by Account:</b>\n"
+            for account, count in target_stats.items():
+                target_lines += f"  📱 @{account}: {count}\n"
+
+        accounts_str = ", ".join(f"@{a}" for a in self.target_accounts) if self.target_accounts else "N/A"
+
         await update.message.reply_text(
             f"📊 <b>Bot Status: {paused_text}</b>\n\n"
+            f"Target accounts: {accounts_str}\n\n"
             f"📥 Pending download: {stats.get('discovered', 0)}\n"
             f"💾 Pending upload: {stats.get('downloaded', 0)}\n"
             f"✅ Uploaded: {stats.get('uploaded', 0)}\n"
             f"❌ Failed: {stats.get('failed', 0)}\n"
-            f"📁 Total tracked: {stats.get('total', 0)}",
+            f"📁 Total tracked: {stats.get('total', 0)}"
+            f"{target_lines}",
             parse_mode="HTML",
         )
 
@@ -124,9 +153,10 @@ class TelegramNotifier:
         }
         for r in recent:
             icon = status_icons.get(r["status"], "❓")
+            target_str = f" → @{r['target_account']}" if r.get("target_account") else ""
             lines.append(
                 f"{icon} <code>{r['shortcode']}</code> "
-                f"from @{r['source_account']} — {r['status']}"
+                f"from @{r['source_account']}{target_str} — {r['status']}"
             )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 

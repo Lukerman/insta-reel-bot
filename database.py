@@ -1,6 +1,7 @@
 """
 SQLite database manager for tracking reel lifecycle.
 States: discovered → downloaded → uploaded (or failed at any step).
+Supports multiple target accounts.
 """
 
 import sqlite3
@@ -14,6 +15,7 @@ class Database:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
+        self._migrate()
 
     def _create_tables(self):
         self.conn.execute("""
@@ -25,12 +27,21 @@ class Database:
                 status TEXT NOT NULL DEFAULT 'discovered',
                 local_path TEXT,
                 error_message TEXT,
+                target_account TEXT,
                 discovered_at TEXT NOT NULL,
                 downloaded_at TEXT,
                 uploaded_at TEXT
             )
         """)
         self.conn.commit()
+
+    def _migrate(self):
+        """Add target_account column if missing (upgrade from older schema)."""
+        cursor = self.conn.execute("PRAGMA table_info(reels)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "target_account" not in columns:
+            self.conn.execute("ALTER TABLE reels ADD COLUMN target_account TEXT")
+            self.conn.commit()
 
     def is_duplicate(self, shortcode: str) -> bool:
         """Check if a reel with this shortcode already exists."""
@@ -54,7 +65,7 @@ class Database:
     def update_status(self, shortcode: str, status: str, **kwargs):
         """
         Update a reel's status and optional fields.
-        Supported kwargs: local_path, error_message
+        Supported kwargs: local_path, error_message, target_account
         """
         sets = ["status = ?"]
         params = [status]
@@ -72,6 +83,9 @@ class Database:
         if "error_message" in kwargs:
             sets.append("error_message = ?")
             params.append(kwargs["error_message"])
+        if "target_account" in kwargs:
+            sets.append("target_account = ?")
+            params.append(kwargs["target_account"])
 
         params.append(shortcode)
         self.conn.execute(
@@ -105,10 +119,18 @@ class Database:
         stats["total"] = total
         return stats
 
+    def get_stats_by_target(self) -> dict:
+        """Get upload counts grouped by target account."""
+        rows = self.conn.execute(
+            """SELECT COALESCE(target_account, 'unknown') as target, COUNT(*) as count
+               FROM reels WHERE status = 'uploaded' GROUP BY target_account"""
+        ).fetchall()
+        return {row["target"]: row["count"] for row in rows}
+
     def get_recent(self, limit: int = 5) -> list:
         """Get the most recently updated reels."""
         rows = self.conn.execute(
-            """SELECT shortcode, source_account, status, 
+            """SELECT shortcode, source_account, status, target_account,
                       COALESCE(uploaded_at, downloaded_at, discovered_at) as last_update
                FROM reels ORDER BY last_update DESC LIMIT ?""",
             (limit,)

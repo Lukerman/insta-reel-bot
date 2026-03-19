@@ -145,15 +145,27 @@ async def cleanup_worker(
     if not os.path.exists(download_dir):
         return
 
-    files = glob.glob(os.path.join(download_dir, "*.mp4"))
-    if not files:
+    all_files = [
+        os.path.join(download_dir, f)
+        for f in os.listdir(download_dir)
+        if os.path.isfile(os.path.join(download_dir, f))
+    ]
+    if not all_files:
         return
 
-    logger.info(f"🧹 Cleanup worker: found {len(files)} file(s) in downloads/")
+    logger.info(f"🧹 Cleanup worker: found {len(all_files)} file(s) in downloads/")
     cleaned = 0
 
-    for filepath in files:
+    for filepath in all_files:
         filename = os.path.basename(filepath)
+
+        # Non-mp4 files (thumbnails like .mp4.jpg, etc.) — delete immediately
+        if not filename.endswith(".mp4"):
+            logger.info(f"  🗑️ Deleting non-video file: {filename}")
+            _force_delete(filepath)
+            cleaned += 1
+            continue
+
         shortcode = filename.replace(".mp4", "")
 
         try:

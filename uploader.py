@@ -4,6 +4,7 @@ Uses instagrapi for authenticated Instagram API access.
 """
 
 import gc
+import glob
 import os
 import time
 import logging
@@ -100,8 +101,9 @@ class ReelUploader:
                 uploaded.append(reel)
                 logger.info(f"  ✅ Uploaded reel {shortcode} (media ID: {media.pk})")
 
-                # Delete the video file after successful upload
+                # Delete the video file and any associated thumbnails after successful upload
                 self._delete_file(local_path)
+                self._delete_related_files(local_path)
 
                 # After every batch_size uploads, wait delay_minutes (skip after the last reel)
                 batch_pos = (i + 1) % batch_size
@@ -139,3 +141,12 @@ class ReelUploader:
                 logger.warning(f"  ⚠️ Delete failed: {e}")
                 return
         logger.warning(f"  ⚠️ Could not delete {filepath} after {retries} attempts")
+
+    def _delete_related_files(self, filepath: str):
+        """Delete thumbnail/related files created by instagrapi (e.g., .mp4.jpg)."""
+        for related in glob.glob(f"{filepath}.*"):
+            try:
+                os.remove(related)
+                logger.info(f"  🗑️ Deleted related file: {related}")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Failed to delete related file {related}: {e}")

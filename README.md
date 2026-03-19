@@ -1,6 +1,6 @@
 # 🤖 Insta Reel Bot
 
-An automated Instagram Reel reposting bot that monitors source accounts, downloads new reels, reposts them to your account in batches, and sends real-time status updates via Telegram.
+An automated Instagram Reel reposting bot that monitors source accounts, downloads new reels, reposts them to **multiple target accounts** in batches, and sends real-time status updates via Telegram.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
@@ -13,11 +13,12 @@ An automated Instagram Reel reposting bot that monitors source accounts, downloa
 - 🔍 **Auto-Discovery** — Monitors selected Instagram accounts for new reels
 - ⬇️ **Smart Download** — Downloads reels with duplicate detection
 - 📤 **Batch Upload** — Uploads reels in configurable batches (e.g., 3 at a time, 30-min gap)
-- 🤖 **Telegram Bot** — Real-time notifications + interactive commands
-- 🗄️ **SQLite Tracking** — Full lifecycle tracking (discovered → downloaded → uploaded)
+- 📱 **Multi-Account Targets** — Distribute reels across multiple reposting accounts (round-robin)
+- 🤖 **Telegram Bot** — Real-time notifications + interactive commands with per-account stats
+- 🗄️ **SQLite Tracking** — Full lifecycle tracking (discovered → downloaded → uploaded) with target account info
 - 🧹 **Cleanup Worker** — Automatically deletes files after upload, catches missed files
-- 🔐 **Session Caching** — Saves Instagram session to avoid repeated logins
-- 🛡️ **Rate Limit Handling** — Built-in delays and retry logic
+- 🔐 **Session Caching** — Saves Instagram session per account to avoid repeated logins
+- 🛡️ **Rate Limit Handling** — Independent rate-limit tracking per target account
 
 ## 📁 Project Structure
 
@@ -26,11 +27,11 @@ insta-reel-bot/
 ├── .env                 # Credentials & settings (not tracked by git)
 ├── .gitignore           # Git ignore rules
 ├── requirements.txt     # Python dependencies
-├── config.py            # Config loader with validation
-├── database.py          # SQLite database manager
+├── config.py            # Config loader with multi-account support
+├── database.py          # SQLite database manager with target tracking
 ├── scraper.py           # Reel discovery from source accounts
 ├── downloader.py        # Video file downloader
-├── uploader.py          # Reel uploader to target account
+├── uploader.py          # Multi-account uploader with round-robin
 ├── telegram_bot.py      # Telegram notifications & commands
 └── main.py              # Main orchestrator
 ```
@@ -40,7 +41,7 @@ insta-reel-bot/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/insta-reel-bot.git
+git clone https://github.com/Lukerman/insta-reel-bot.git
 cd insta-reel-bot
 ```
 
@@ -55,9 +56,13 @@ pip install -r requirements.txt
 Copy and edit the `.env` file with your credentials:
 
 ```env
-# Instagram Target Account (the one that reposts)
-IG_USERNAME=your_username
-IG_PASSWORD=your_password
+# Instagram Target Accounts (the ones that repost)
+# Add as many as needed with numbered suffixes
+IG_USERNAME_1=your_first_account
+IG_PASSWORD_1=your_first_password
+
+IG_USERNAME_2=your_second_account
+IG_PASSWORD_2=your_second_password
 
 # Telegram Bot (create via @BotFather)
 TELEGRAM_BOT_TOKEN=your_bot_token
@@ -76,6 +81,8 @@ BATCH_SIZE=3
 CAPTION_TEMPLATE=🎬 Reposted | Credit: @{source}
 ```
 
+> **Note:** The old single-account format (`IG_USERNAME` / `IG_PASSWORD`) still works as a fallback.
+
 ### 4. Run the bot
 
 ```bash
@@ -86,8 +93,8 @@ python main.py
 
 | Command | Description |
 |---------|-------------|
-| `/status` | Show current bot stats |
-| `/recent` | Show last 5 tracked reels |
+| `/status` | Show current bot stats & per-account upload counts |
+| `/recent` | Show last 5 tracked reels with target account info |
 | `/pause` | Pause the bot |
 | `/resume` | Resume the bot |
 | `/help` | Show all commands |
@@ -95,12 +102,16 @@ python main.py
 ## ⚙️ How It Works
 
 ```
-┌──────────┐     ┌────────────┐     ┌──────────┐
-│ Scraper  │────▶│ Downloader │────▶│ Uploader │
-│ (discover)│    │ (save .mp4)│     │ (repost) │
-└──────────┘     └────────────┘     └──────────┘
-      │                │                  │
-      └───────┬────────┴──────────────────┘
+┌──────────┐     ┌────────────┐     ┌──────────────────┐
+│ Scraper  │────▶│ Downloader │────▶│ UploaderManager  │
+│ (discover)│    │ (save .mp4)│     │ (round-robin)    │
+└──────────┘     └────────────┘     └──────────────────┘
+      │                │              │    │    │
+      │                │           ┌──┘    │    └──┐
+      │                │           ▼       ▼       ▼
+      │                │        Account  Account  Account
+      │                │          #1       #2       #3
+      └───────┬────────┴──────────┴────────┴───────┘
               ▼
        ┌─────────────┐     ┌──────────────┐
        │  Database   │     │ Telegram Bot │
@@ -110,10 +121,23 @@ python main.py
 
 1. **Scrape** — Discovers new reels from source accounts via private API
 2. **Download** — Downloads video files to local `downloads/` folder
-3. **Upload** — Uploads in batches (3 at a time by default) with delays between batches
+3. **Upload** — Distributes reels round-robin across target accounts in batches with delays
 4. **Cleanup** — Deletes video files after successful upload
-5. **Notify** — Sends status updates to Telegram at every step
+5. **Notify** — Sends status updates to Telegram at every step (with target account info)
 6. **Sleep** — Waits for the configured interval before the next cycle
+
+## 📱 Multi-Account Upload
+
+Reels are distributed across target accounts in **round-robin** fashion:
+- Reel 1 → Account #1
+- Reel 2 → Account #2
+- Reel 3 → Account #1
+- ...
+
+Each account maintains its own:
+- 🔐 **Login session** (`ig_session_<username>.json`)
+- ⏳ **Rate-limit state** — if one account gets throttled, the others keep uploading
+- 📊 **Upload stats** — tracked in the database and shown via `/status`
 
 ## ⚠️ Disclaimer
 

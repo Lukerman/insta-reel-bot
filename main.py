@@ -160,9 +160,6 @@ async def cleanup_worker(
     logger.info(f"🧹 Cleanup worker: found {len(all_files)} file(s) in downloads/")
     cleaned = 0
 
-    # Use first available uploader for cleanup uploads
-    cleanup_uploader = uploader_mgr.uploaders[0] if uploader_mgr.uploaders else None
-
     for filepath in all_files:
         filename = os.path.basename(filepath)
 
@@ -193,31 +190,35 @@ async def cleanup_worker(
                 _force_delete(filepath)
                 cleaned += 1
 
-            elif row["status"] == "downloaded" and cleanup_uploader:
-                # Not yet uploaded — upload it now, then delete
+            elif row["status"] == "downloaded" and uploader_mgr.uploaders:
+                # Not yet uploaded — upload it to ALL target accounts, then delete
                 logger.info(f"  📤 Missed upload, uploading now: {filename}")
-                try:
-                    source = row["source_account"] if row["source_account"] else "unknown"
-                    caption = config.caption_template.replace("{source}", source)
+                source = row["source_account"] if row["source_account"] else "unknown"
+                caption = config.caption_template.replace("{source}", source)
+                successful_accounts = []
 
-                    media = cleanup_uploader.client.clip_upload(
-                        Path(filepath), caption=caption
-                    )
+                for uploader in uploader_mgr.uploaders:
+                    try:
+                        media = uploader.client.clip_upload(
+                            Path(filepath), caption=caption
+                        )
+                        successful_accounts.append(uploader.username)
+                        logger.info(f"  ✅ Uploaded {shortcode} to @{uploader.username} (media ID: {media.pk})")
+                        await telegram.notify_upload(
+                            shortcode, source, True,
+                            target_account=uploader.username
+                        )
+                    except Exception as upload_err:
+                        logger.error(f"  ❌ Cleanup upload failed for {shortcode} to @{uploader.username}: {upload_err}")
+
+                if successful_accounts:
+                    target_str = ", ".join(successful_accounts)
                     db.update_status(
                         shortcode, "uploaded",
-                        target_account=cleanup_uploader.username
+                        target_account=target_str
                     )
-                    logger.info(f"  ✅ Uploaded {shortcode} (media ID: {media.pk})")
-                    await telegram.notify_upload(
-                        shortcode, source, True,
-                        target_account=cleanup_uploader.username
-                    )
-
-                    # Now delete
                     _force_delete(filepath)
                     cleaned += 1
-                except Exception as upload_err:
-                    logger.error(f"  ❌ Cleanup upload failed for {shortcode}: {upload_err}")
 
             elif row["status"] == "failed":
                 # Previously failed — just delete the file

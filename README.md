@@ -13,7 +13,7 @@ An automated Instagram Reel reposting bot that monitors source accounts, downloa
 - 🔍 **Auto-Discovery** — Monitors selected Instagram accounts for new reels
 - ⬇️ **Smart Download** — Downloads reels with duplicate detection
 - 📤 **Batch Upload** — Uploads reels in configurable batches (e.g., 3 at a time, 30-min gap)
-- 📱 **Multi-Account Targets** — Distribute reels across multiple reposting accounts (round-robin)
+- 📱 **Multi-Account Targets** — Uploads each reel to ALL configured target accounts simultaneously
 - 🤖 **Telegram Bot** — Real-time notifications + interactive commands with per-account stats
 - 🗄️ **SQLite Tracking** — Full lifecycle tracking (discovered → downloaded → uploaded) with target account info
 - 🧹 **Cleanup Worker** — Automatically deletes files after upload, catches missed files
@@ -31,7 +31,7 @@ insta-reel-bot/
 ├── database.py          # SQLite database manager with target tracking
 ├── scraper.py           # Reel discovery from source accounts
 ├── downloader.py        # Video file downloader
-├── uploader.py          # Multi-account uploader with round-robin
+├── uploader.py          # Multi-account uploader (uploads to all targets)
 ├── telegram_bot.py      # Telegram notifications & commands
 └── main.py              # Main orchestrator
 ```
@@ -104,7 +104,7 @@ python main.py
 ```
 ┌──────────┐     ┌────────────┐     ┌──────────────────┐
 │ Scraper  │────▶│ Downloader │────▶│ UploaderManager  │
-│ (discover)│    │ (save .mp4)│     │ (round-robin)    │
+│ (discover)│    │ (save .mp4)│     │ (all accounts)   │
 └──────────┘     └────────────┘     └──────────────────┘
       │                │              │    │    │
       │                │           ┌──┘    │    └──┐
@@ -121,22 +121,21 @@ python main.py
 
 1. **Scrape** — Discovers new reels from source accounts via private API
 2. **Download** — Downloads video files to local `downloads/` folder
-3. **Upload** — Distributes reels round-robin across target accounts in batches with delays
-4. **Cleanup** — Deletes video files after successful upload
+3. **Upload** — Uploads each reel to **all** target accounts in batches with delays
+4. **Cleanup** — Deletes video files after successful upload to all accounts
 5. **Notify** — Sends status updates to Telegram at every step (with target account info)
 6. **Sleep** — Waits for the configured interval before the next cycle
 
 ## 📱 Multi-Account Upload
 
-Reels are distributed across target accounts in **round-robin** fashion:
-- Reel 1 → Account #1
-- Reel 2 → Account #2
-- Reel 3 → Account #1
+Every reel is uploaded to **all** target accounts:
+- Reel 1 → Account #1 **and** Account #2 **and** Account #3
+- Reel 2 → Account #1 **and** Account #2 **and** Account #3
 - ...
 
 Each account maintains its own:
 - 🔐 **Login session** (`ig_session_<username>.json`)
-- ⏳ **Rate-limit state** — if one account gets throttled, the others keep uploading
+- ⏳ **Rate-limit handling** — failed accounts are skipped, successful ones are tracked
 - 📊 **Upload stats** — tracked in the database and shown via `/status`
 
 ## ⚠️ Disclaimer

@@ -68,10 +68,10 @@ class ReelUploader:
             logger.error(f"❌ [{self.username}] Login failed: {e}")
             raise
 
-    def upload_reel(self, reel: dict) -> bool:
+    def upload_reel(self, reel: dict, delete_file: bool = True) -> bool:
         """
         Upload a single reel. Returns True on success, False on failure.
-        Updates the database status and target_account accordingly.
+        If delete_file is False, the video file is kept (for multi-account uploads).
         """
         shortcode = reel["shortcode"]
         local_path = reel["local_path"]
@@ -79,7 +79,6 @@ class ReelUploader:
 
         if not local_path or not os.path.exists(local_path):
             logger.warning(f"⚠️ [{self.username}] File not found for {shortcode}: {local_path}")
-            self.db.update_status(shortcode, "failed", error_message="File not found")
             return False
 
         try:
@@ -87,25 +86,21 @@ class ReelUploader:
             caption = self.caption_template.replace("{source}", source)
             media = self.client.clip_upload(Path(local_path), caption=caption)
 
-            self.db.update_status(shortcode, "uploaded", target_account=self.username)
             logger.info(f"  ✅ [{self.username}] Uploaded {shortcode} (media ID: {media.pk})")
 
-            # Delete the video file and any associated thumbnails
-            self._delete_file(local_path)
-            self._delete_related_files(local_path)
+            if delete_file:
+                self._delete_file(local_path)
+                self._delete_related_files(local_path)
             return True
 
         except PleaseWaitFewMinutes:
             logger.warning(f"  ⏳ [{self.username}] Rate limited!")
-            self.db.update_status(shortcode, "downloaded")  # Keep for retry
             return False
         except FeedbackRequired as e:
             logger.error(f"  ❌ [{self.username}] Feedback required for {shortcode}: {e}")
-            self.db.update_status(shortcode, "failed", error_message=f"Feedback: {e}")
             return False
         except Exception as e:
             logger.error(f"  ❌ [{self.username}] Upload failed for {shortcode}: {e}")
-            self.db.update_status(shortcode, "failed", error_message=str(e))
             return False
 
     def _delete_file(self, filepath: str, retries: int = 3, delay: float = 2.0):
@@ -142,7 +137,6 @@ class UploaderManager:
         self.db = db
         self.caption_template = caption_template
         self.uploaders: list[ReelUploader] = []
-        self._upload_index = 0  # Round-robin counter
 
         for account in target_accounts:
             try:
@@ -173,54 +167,54 @@ class UploaderManager:
 
     def upload_pending(self, limit: int = 6, delay_minutes: int = 30, batch_size: int = 3) -> list[dict]:
         """
-        Upload pending reels distributed round-robin across target accounts.
+        Upload pending reels to ALL target accounts.
+        Each reel is uploaded to every account before moving to the next reel.
         Returns list of successfully uploaded reel dicts.
         """
         pending = self.db.get_pending_uploads(limit=limit)
         uploaded = []
-        rate_limited_accounts = set()
 
         for i, reel in enumerate(pending):
-            # Skip if all accounts are rate-limited
-            if len(rate_limited_accounts) >= len(self.uploaders):
-                logger.warning("⚠️ All target accounts rate-limited. Stopping uploads.")
-                break
+            shortcode = reel["shortcode"]
+            local_path = reel["local_path"]
+            successful_accounts = []
 
-            # Pick the next available uploader (round-robin, skip rate-limited)
-            uploader = self._get_next_uploader(rate_limited_accounts)
-            if uploader is None:
-                break
+            # Upload this reel to ALL target accounts
+            for j, uploader in enumerate(self.uploaders):
+                # Don't delete file until the last uploader is done
+                is_last = (j == len(self.uploaders) - 1)
+                success = uploader.upload_reel(reel, delete_file=is_last)
 
-            success = uploader.upload_reel(reel)
+                if success:
+                    successful_accounts.append(uploader.username)
 
-            if success:
-                reel["target_account"] = uploader.username
+                # Small delay between accounts to avoid rate limits
+                if not is_last:
+                    time.sleep(5)
+
+            if successful_accounts:
+                # Mark as uploaded with all successful target accounts
+                target_str = ", ".join(successful_accounts)
+                self.db.update_status(shortcode, "uploaded", target_account=target_str)
+                reel["target_account"] = target_str
                 uploaded.append(reel)
+                logger.info(f"  ✅ Reel {shortcode} uploaded to: {target_str}")
 
-                # Batch delay: after every batch_size uploads, wait
-                batch_pos = (len(uploaded)) % batch_size
-                if batch_pos == 0 and i < len(pending) - 1:
-                    logger.info(f"  📦 Batch of {batch_size} done. Waiting {delay_minutes} mins...")
-                    time.sleep(delay_minutes * 60)
+                # If file wasn't deleted by last uploader (e.g. it failed), clean up
+                if local_path and os.path.exists(local_path):
+                    self.uploaders[0]._delete_file(local_path)
+                    self.uploaders[0]._delete_related_files(local_path)
             else:
-                # Check if it was a rate limit (status kept as 'downloaded')
-                row = self.db.conn.execute(
-                    "SELECT status FROM reels WHERE shortcode = ?", (reel["shortcode"],)
-                ).fetchone()
-                if row and row["status"] == "downloaded":
-                    # Rate limited — mark this account
-                    rate_limited_accounts.add(uploader.username)
+                # All accounts failed — keep as downloaded for retry
+                self.db.update_status(shortcode, "downloaded")
+                logger.warning(f"  ⚠️ All accounts failed for {shortcode}, will retry next cycle.")
 
-        logger.info(f"📊 Upload complete. {len(uploaded)}/{len(pending)} successful.")
+            # Batch delay: after every batch_size uploads, wait
+            batch_pos = (len(uploaded)) % batch_size
+            if batch_pos == 0 and len(uploaded) > 0 and i < len(pending) - 1:
+                logger.info(f"  📦 Batch of {batch_size} done. Waiting {delay_minutes} mins...")
+                time.sleep(delay_minutes * 60)
+
+        logger.info(f"📊 Upload complete. {len(uploaded)}/{len(pending)} reels uploaded to all accounts.")
         return uploaded
 
-    def _get_next_uploader(self, skip_accounts: set) -> ReelUploader | None:
-        """Get the next uploader in round-robin order, skipping rate-limited ones."""
-        tried = 0
-        while tried < len(self.uploaders):
-            uploader = self.uploaders[self._upload_index % len(self.uploaders)]
-            self._upload_index += 1
-            if uploader.username not in skip_accounts:
-                return uploader
-            tried += 1
-        return None
